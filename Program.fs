@@ -13,28 +13,31 @@ let rFactor = 2.0 ** (bFactor|>float) |> int
 let LeafSetSize = rFactor
 let NeighborSetSize = rFactor
 let mutable numNodes = 1
-let coordinateRange = 1000
+let maxDistance = 1000
 //end
 
 //Global use
 
-
+type Msg = 
+    | JOIN
 
 type NodeMessage =
-    | GetCoordinate
+    | PastryInit of string
+    | Route of Msg * string
 
 type PastryNodeMessage =
     | InitStart
     | End
 
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // random a integer between -coordinatRange ~ coordianteRange
-let rndCoordinate (rnd:Random)= 
-    rnd.Next(0,coordinateRange)*2 - coordinateRange
+//let rndCoordinate (rnd:Random)= 
+//    rnd.Next(0,coordinateRange)*2 - coordinateRange
 
-let getNodeActorRefByName name =
+let selectActorByName name =
     select ("akka://" + system.Name + "/user/" + nodeNamePrefix + name) system
 
 // generate a random 128bit 
@@ -65,10 +68,8 @@ let node message =
 let nodes (nodeMailbox:Actor<NodeMessage>) =
     let nodeName = nodeMailbox.Self.Path.Name
     let nodeIdx = nodeName.Substring(4) |> int
+    let mutable nodeID = ""
     //printfn "[%s] %s" nodeName (nodeMailbox.Self.Path.ToString())
-    let rnd = Random()
-    //let xCoordinate = rndCoordinate rnd
-    //let yCoordinate = rndCoordinate rnd
     let mutable leafSet = Set.empty
     let mutable neighborSet = Set.empty
     let routingTable = Array2D.create (ceil(Math.Log((numNodes|>float),(rFactor|>float)))|>int) (rFactor-1) ""
@@ -76,8 +77,27 @@ let nodes (nodeMailbox:Actor<NodeMessage>) =
     //printfn " tet = %d" (ceil(Math.Log((numNodes|>float),(rFactor|>float)))|>int)
     let rec loop() = actor {
         let! (msg: NodeMessage) = nodeMailbox.Receive()
-        //match msg with
-        
+        match msg with
+            
+            | PastryInit nodeA -> (* nodeA is assigned by pastryboss according to proximity metric *)
+
+                (* random a 128 bit number and hash it with MD5 to get a 128 bit nodeID  *)
+                let rnd = Random()
+                nodeID <- hash (getID rnd)
+                printfn "[%s] My nodeID is %A" nodeName nodeID
+
+                (* Any initial procedures?*)
+                //TODO:
+
+                (* Send route message to nodeA, with "JOIN" type Msg *)
+                selectActorByName nodeA <! Route (JOIN, nodeID)
+                return! loop()
+            | Route (msg, key) ->
+                match (msg) with
+                    | JOIN ->
+                        ()
+                    
+                return! loop()
          
         return! loop()
     }
@@ -94,17 +114,38 @@ let pastryBoss (proxMetric:int [,]) numNodes (pbossMailbox:Actor<PastryNodeMessa
         let! (msg: PastryNodeMessage) = pbossMailbox.Receive()
         match msg with
             | InitStart ->
+                (* all nodes are already added to the network *)
                 if nodeCount = numNodes then
-                    getNodeActorRefByName nodeName <! End
+                    selectActorByName nodeName <! End
                 nodeCount <- nodeCount + 1
+                printfn "[%s] nodeCount:%d" nodeName nodeCount
+                (* the node going to be add to pastry network *)
                 let newNodeName = nodeNamePrefix + nodeCount.ToString()
-                let rand = Random()
-                let newNodeID = hash (getID rand)
-                printfn "[%s] %A\n" nodeName newNodeID
+                printfn "[%s] %s is ready to be add to the network\n" nodeName newNodeName
                 
-                ()
+                
+                (* find a closest node in the network according to the proximity metric *)
+                //let rnd = Random()
+                //for i in 1 .. 5 do
+                //    networkNodeSet <- networkNodeSet.Add(rnd.Next(1,numNodes))
+                let mutable nodeA = ""
+                if not networkNodeSet.IsEmpty then
+                    let mutable distance = maxDistance + 1
+                    for node in networkNodeSet do
+                        let row = (min node nodeCount)-1 //array starts from 0
+                        let col = (max node nodeCount)-1 //array starts from 0
+                        //printfn "node:%d, row:%d, col:%d nodeA:%s dis:%d\n" node row col nodeA distance
+                        if proxMetric.[row,col] < distance then
+                            nodeA <- node.ToString()
+                            distance <- proxMetric.[row,col]
+                    nodeA <- nodeNamePrefix + nodeA
+                printfn "[%s] the first neighbor of %s is nodeA: %s\n" nodeName newNodeName nodeA
+                (* Send this nodeA to the new-to-be-added node *)
+                selectActorByName newNodeName <! PastryInit nodeA
+                return! loop()
+
             | End ->
-                printfn "The whole pastry network has built, total nodes %d\n" nodeCount
+                printfn "The whole pastry network has been built, total nodes count: %d\n" nodeCount
          
         return! loop()
     }
@@ -166,7 +207,7 @@ let main argv =
             for j in (i) .. (numNodes-1) do
                 let rnd = Random()
                 //printfn "%d,%d" (i-1) j
-                proxMetric.[i-1,j] <- rnd.Next(0, coordinateRange)
+                proxMetric.[i-1,j] <- rnd.Next(0, maxDistance)
             //let nodename = nodeNamePrefix  + i.ToString()
             //spawn system nodename nodes |> ignore
         //printfn "%A\n" proxMetric
