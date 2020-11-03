@@ -23,10 +23,12 @@ type Msg =
 
 type NodeMessage =
     | PastryInit of string
+    | PastryInitDone of string
     | Route of Msg * string
-
+    
 type PastryNodeMessage =
-    | InitStart
+    | AddNewNode
+    | AddComplete of string
     | End
 
 
@@ -38,7 +40,7 @@ type PastryNodeMessage =
 //    rnd.Next(0,coordinateRange)*2 - coordinateRange
 
 let selectActorByName name =
-    select ("akka://" + system.Name + "/user/" + nodeNamePrefix + name) system
+    select ("akka://" + system.Name + "/user/" + name) system
 
 // generate a random 128bit 
 let getID (rand:Random) = 
@@ -89,12 +91,37 @@ let nodes (nodeMailbox:Actor<NodeMessage>) =
                 (* Any initial procedures?*)
                 //TODO:
 
+                (* If nodeA is null, means it is the very first node in the pastry network, inform the pastry boss for completion *)
+                if nodeA = "" then
+                    selectActorByName "pastryBoss" <! AddComplete nodeName
+                    return! loop()
+
                 (* Send route message to nodeA, with "JOIN" type Msg *)
                 selectActorByName nodeA <! Route (JOIN, nodeID)
+                // TODO: request nodeA's leaf set for initialize my own leaf set
                 return! loop()
+            | PastryInitDone nodeZ ->
+                printfn "[%s] My nodeZ is %s\n" nodeName nodeZ
+                (* the nodeZ is found *)
+                //TODO: do some initialize, inform other nodes about my presents
+
+                (* Notice the pastry boss that I am successfully added to the network *)
+                selectActorByName "pastryBoss" <! AddComplete nodeName
+                return! loop()
+
+             
             | Route (msg, key) ->
                 match (msg) with
                     | JOIN ->
+                        printfn "[%s] Receive JOIN route from %s\n" nodeName (nodeMailbox.Sender().Path.Name)
+                        (* forward the msg according to routing algorithm *)
+                        //TODO: routing algorithm
+                        (* Send my own state table to the sender *)
+                        //TODO: send back my routing table
+                        (* If I am the nodeZ, which is the numerically closest node to the new node in whole network *)
+                        //TODO: update neighbor table, send back my state tables?
+                        // infrom the new node that i am the destination node
+                        nodeMailbox.Sender() <! PastryInitDone nodeName
                         ()
                     
                 return! loop()
@@ -113,14 +140,16 @@ let pastryBoss (proxMetric:int [,]) numNodes (pbossMailbox:Actor<PastryNodeMessa
     let rec loop() = actor {
         let! (msg: PastryNodeMessage) = pbossMailbox.Receive()
         match msg with
-            | InitStart ->
+            | AddNewNode ->
                 (* all nodes are already added to the network *)
                 if nodeCount = numNodes then
                     selectActorByName nodeName <! End
+                    return! loop()
                 nodeCount <- nodeCount + 1
                 printfn "[%s] nodeCount:%d" nodeName nodeCount
-                (* the node going to be add to pastry network *)
+                (* spawn the node going to be add to pastry network*)
                 let newNodeName = nodeNamePrefix + nodeCount.ToString()
+                spawn system newNodeName nodes |> ignore
                 printfn "[%s] %s is ready to be add to the network\n" nodeName newNodeName
                 
                 
@@ -143,9 +172,19 @@ let pastryBoss (proxMetric:int [,]) numNodes (pbossMailbox:Actor<PastryNodeMessa
                 (* Send this nodeA to the new-to-be-added node *)
                 selectActorByName newNodeName <! PastryInit nodeA
                 return! loop()
+            | AddComplete nodeName ->
+                let nodeIdx = nodeName.Substring(4) |> int
+                networkNodeSet <- networkNodeSet.Add(nodeIdx)
+                printfn "[%s] Node%d is successfully added to the Pastry network\n" nodeName nodeIdx
 
+                (* Then send a AddNewNode msg to myself to start another node adding *)
+                pbossMailbox.Self <! AddNewNode
+                return! loop()
+            
             | End ->
                 printfn "The whole pastry network has been built, total nodes count: %d\n" nodeCount
+                printfn "[%s] networkNodeSet:\n %A\n" nodeName networkNodeSet
+                Environment.Exit 1
          
         return! loop()
     }
@@ -213,7 +252,7 @@ let main argv =
         //printfn "%A\n" proxMetric
 
         let pastryBossRef = spawn system "pastryBoss" (pastryBoss proxMetric numNodes)
-        pastryBossRef <! InitStart
+        pastryBossRef <! AddNewNode
 
        
         
