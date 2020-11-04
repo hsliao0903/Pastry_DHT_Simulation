@@ -1,6 +1,4 @@
-﻿
-
-open System
+﻿open System
 open System.Security.Cryptography
 open System.Globalization
 open System.Text
@@ -17,13 +15,114 @@ let bFactor = 1
 let rFactor = 2.0 ** (bFactor|>float) |> int
 let LeafSetSize = rFactor  
 let NeighborSetSize = rFactor //may be set to 2*rFactor
-let mutable numNodes = 1
+//let mutable numNodes = 1
 let maxDistance = 1000
+let keyBits = 128
 //end
-
+let mutable nrow = floor (keyBits/bFactor|>float) |> int
+let ncol = rFactor // not rFactor-1
+let hashedIdLength = rFactor
+let mutable proxMetric = ProxityMetric(0, 0)
 //Global use
-let mutable proxMetric = ProxityMetric(numNodes, maxDistance)
+//let mutable proxMetric = ProxityMetric(numNodes, maxDistance)
 
+
+
+//let mutable test = ProxityMetric(0,0)
+
+type RTEntry(ownerID:string, ownerIdx:int, nodeID:string, nodeIdx:int) as self =
+    let mutable owner = ownerID
+    let mutable node = nodeID
+    let mutable oIdx = ownerIdx
+    let mutable nIdx = nodeIdx
+    let mutable commonPrefix = ""
+    let mutable nextDigit = ' '
+    let mutable restOfID = ""
+    let mutable dist = proxMetric.GetDistance oIdx nIdx
+
+    let len = ownerID.Length
+    do 
+        if nodeID <> "" then self.OwnerUpdate ownerID oIdx
+    
+    member this.OwnerID with get() = owner 
+    member this.NodeID with get() = node
+    member this.OwnerIdx with get() = oIdx
+    member this.NodeIdx with get() = nIdx
+    member this.CommonPrefix with get() = commonPrefix
+    member this.NextDigit with get() = nextDigit
+    member this.RestOfID with get() = restOfID
+    member this.Distance with get() = dist
+    
+    // Used when this entry was send to a new owner(node) for init
+    member this.OwnerUpdate (newOwnerID:string) (newOwnerIdx: int) =
+        owner <- newOwnerID
+        oIdx <- newOwnerIdx
+        dist <- proxMetric.GetDistance oIdx nIdx
+        let mutable i = 0
+        while (i < node.Length) && (owner.[i] = node.[i]) do
+            i <- i + 1
+        if i > 0 then commonPrefix <- node.[0..i-1]
+        if i < len then nextDigit <- node.[i]
+        if i + 1 < len then restOfID <- node.[i+1 .. len]
+    
+    // Used when the owner update with the received "join" message from a new node
+    member this.NodeUpdate (newNodeID:string) (newNodeIdx:int)=
+        node <- newNodeID
+        nIdx <- newNodeIdx
+        dist <- proxMetric.GetDistance oIdx nIdx
+        let mutable i = 0
+        while (i < min owner.Length node.Length) && (owner.[i] = node.[i]) do
+            i <- i + 1
+        if i > 0 then commonPrefix <- node.[0..i-1]
+        if i < len then nextDigit <- node.[i]
+        if i + 1 < len then restOfID <- node.[i+1 .. len]
+
+
+type RoutingTable (ownerID:string, ownerIdx: int) as self =
+    
+    let mutable tb = Array2D.create nrow ncol (RTEntry(ownerID, ownerIdx, "", -1))
+    
+    let closer idx1 idx2 = 
+        let dist1 = (proxMetric.GetDistance self.OwnerIdx idx1)
+        let dist2 = (proxMetric.GetDistance self.OwnerIdx idx2)
+        if dist1 < dist2 then idx1 else idx2
+
+    member this.Table with get() = tb 
+    member this.OwnerID = ownerID
+    member this.OwnerIdx = ownerIdx
+
+    member this.GetEntry(i:int,j:int) =
+        this.Table.[i,j]
+
+    (* Modify the owner of each entry from the row of existing Node *)
+    member this.InitWith (nHob:int) (newRTB:RoutingTable) =
+        tb.[nHob,*] <- 
+            newRTB.Table.[nHob,*] 
+            |> Array.map(fun entry -> 
+                entry.OwnerUpdate this.OwnerID this.OwnerIdx
+                entry
+                )
+    
+    (* Used when the owner receive the join message from a new node *)
+    member this.Update (newNodeID:string, newNodeIdx:int) =
+        //find common prefix
+        // i indicates the length of the common prefix
+        let mutable i = 0
+        while this.OwnerID.[i] = newNodeID.[i] do
+            i <- i + 1
+        let nextDigit = newNodeID.[i]
+        let j =
+            if nextDigit >= '0' && nextDigit <= '9' 
+            then int nextDigit - int '0'
+            else (int nextDigit - int 'A') + 10 //nextDigit in 'A' to 'F'
+        //printfn "i:%d, j:%d" i j
+
+        (* If the new node is closer to the owner than the present node, replace it*)
+        if i < nrow && j < ncol && (newNodeIdx = closer newNodeIdx (tb.[i,j].NodeIdx)) then
+            tb.[i,j].NodeUpdate newNodeID newNodeIdx
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 type Msg = 
     | JOIN
@@ -34,7 +133,7 @@ type NodeMessage =
     | Route of Msg * string * int * int
     | InitNborSet of Map<int, string>
     | InitLeafSet of Map<int, string>
-    | InitRoutingTable of int
+    | InitRoutingTable of int * RoutingTable
     | UpdateStates of int * string
 
 type PastryNodeMessage =
@@ -43,27 +142,18 @@ type PastryNodeMessage =
     | End
 
 
-type ProxityMetric (numNodes, maxDistance) =
-   let mutable pm = Map.empty
-   let rand = Random()
-   do for i in 1 .. numNodes do
-       for j in i .. (numNodes-1) do
-           let d = rand.Next(0,maxDistance)
-           pm <- pm.Add((i,j),d)
-           pm <- pm.Add((j,i),d)
- 
-   member val FullMetric = pm
-   member this.GetDistance i j = pm.[i,j]
- 
-let pm = ProxityMetric (numNodes,maxDistance)
+
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-// random a integer between -coordinatRange ~ coordianteRange
-//let rndCoordinate (rnd:Random)= 
-//    rnd.Next(0,coordinateRange)*2 - coordinateRange
+let hexCharToInt (hexChar:char) =
+    if hexChar >= '0' && hexChar <= '9' then 
+        int hexChar - int '0'
+    else 
+        (int hexChar - int 'A') + 10
+
 
 let getNodeName idx =
     nodeNamePrefix + idx.ToString()
@@ -75,7 +165,7 @@ let selectActorByName name =
 let getID (rand:Random) = 
     let mutable res = 0I
     let mutable digit = 1I
-    for i in 1 .. 128 do
+    for i in 1 .. keyBits do
         if rand.Next(2) > 0 then
             res <- res + digit
         digit <- digit*2I
@@ -146,7 +236,7 @@ let getSmallestDiffLeafNode leafSet key curKey curID=
 let shl (keyA:string) (keyB:string) =
     let len = keyA.Length
     if len <> keyB.Length then
-        printfn "Somthing is wrong in shl function\n\n"
+        printfn "Somthing is wrong in shl function, keyA:%s, keyB:%s\n\n" keyA keyB
         Environment.Exit 1
     
     let mutable idx = -1
@@ -224,7 +314,7 @@ let getProx (proxMetric:int [,]) i j =
     let col = (max i j)-1 //array starts from 0
     proxMetric.[row,col]
 
-let updateNeighborSet curNodeIdx (nborSet:Map<int, string>) (proxMetric:int [,]) newNodeIdx newNodeID =
+let updateNeighborSet curNodeIdx (nborSet:Map<int, string>) newNodeIdx newNodeID =
     let mutable resSet = Map.empty
     let mutable farrestIdx = 0
     let mutable tmpFarrestProx = -1
@@ -232,7 +322,8 @@ let updateNeighborSet curNodeIdx (nborSet:Map<int, string>) (proxMetric:int [,])
     //printfn "[updateNeighborSet]\n%A" nborSet
     for KeyValue(nodeIdx, nodeID) in nborSet do
         nborCount <- nborCount + 1
-        let prox = getProx proxMetric curNodeIdx nodeIdx
+        //let prox = getProx proxMetric curNodeIdx nodeIdx
+        let prox = proxMetric.GetDistance curNodeIdx nodeIdx
         if prox > tmpFarrestProx then
             farrestIdx <- nodeIdx
             tmpFarrestProx <- prox
@@ -244,25 +335,27 @@ let updateNeighborSet curNodeIdx (nborSet:Map<int, string>) (proxMetric:int [,])
     if nborCount < NeighborSetSize then
         resSet <- nborSet.Add(newNodeIdx, newNodeID)
     else
-        let prox = getProx proxMetric curNodeIdx newNodeIdx
+        //let prox = getProx proxMetric curNodeIdx newNodeIdx
+        let prox = proxMetric.GetDistance curNodeIdx newNodeIdx
         if prox < tmpFarrestProx then
             resSet <- nborSet.Remove(farrestIdx)
             resSet <- resSet.Add(newNodeIdx, newNodeID)
         else
             resSet <- nborSet
     resSet
-    
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
+let nodes hashID (nodeMailbox:Actor<NodeMessage>) =
     let nodeName = nodeMailbox.Self.Path.Name
     let nodeIdx = nodeName.Substring(4) |> int
-    let mutable nodeID = ""
+    let mutable nodeID = hashID
     //printfn "[%s] %s" nodeName (nodeMailbox.Self.Path.ToString())
     let mutable leafSet = Map.empty
     let mutable neighborSet = Map.empty
-    let routingTable = Array2D.create (ceil(Math.Log((numNodes|>float),(rFactor|>float)))|>int) (rFactor-1) ""
+    //let routingTable = Array2D.create (ceil(Math.Log((numNodes|>float),(rFactor|>float)))|>int) (rFactor-1) ""
+    let routingTable = RoutingTable(nodeID, nodeIdx)
     //printfn "[%s] %d, %d, %A, %A, %A\n" nodeName xCoordinate yCoordinate leafSet neighborSet routingTable
     //printfn " tet = %d" (ceil(Math.Log((numNodes|>float),(rFactor|>float)))|>int)
     let rec loop() = actor {
@@ -272,12 +365,9 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
             | PastryInit nodeAIdx -> (* nodeA is assigned by pastryboss according to proximity metric *)
 
                 (* random a 128 bit number and hash it with MD5 to get a 128 bit nodeID for myself *)
-                let rnd = Random()
-                nodeID <- hash (getID rnd)
+                //let rnd = Random()
+                //nodeID <- hash (getID rnd)
                 printfn "[%s] My nodeID is %A" nodeName nodeID
-
-                (* Any other initial procedures? *)
-                //TODO:
 
                 (* If nodeA is NULL, means it is the very first node in the pastry network, inform the pastry boss for completion *)
                 if nodeAIdx = 0 then
@@ -290,7 +380,7 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                 (* Send route message to nodeA, with "JOIN" type Msg *)
                 let hopCount = 0
                 selectActorByName (getNodeName nodeAIdx) <! Route (JOIN, nodeID, nodeIdx, hopCount)
-                // TODO: request nodeA's leaf set for initialize my own leaf set
+                
                 
                 return! loop()
 
@@ -301,7 +391,14 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                 for KeyValue(leafIdx, nodeKey) in leafSet do
                     selectActorByName (getNodeName leafIdx) <! UpdateStates (nodeIdx, nodeID)
                 (* Inform all nodes in my routing table *)
-                //TODO: 
+                 
+                for i in 0 .. nrow-1 do
+                    for j in 0 .. ncol-1 do
+                        let rtIdx = routingTable.GetEntry(i,j).NodeIdx
+                        if rtIdx <> -1 then
+                            printfn "[%s] Inform to Node%d in routing table" nodeName rtIdx
+                            selectActorByName (getNodeName rtIdx) <! UpdateStates (nodeIdx, nodeID)
+
                 (* Inform all nodes in my neighbor set *)
                 for KeyValue(nborIdx, nodeKey) in neighborSet do
                     selectActorByName (getNodeName nborIdx) <! UpdateStates (nodeIdx, nodeID)
@@ -330,7 +427,7 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                             if nextNodeIdx <> nodeIdx then
                                 //nextNodeName <- nodeNamePrefix + nodeZIdx.ToString()
                                 //TODO: send my (hopcount) th row of routing table to sender
-                                selectActorByName (getNodeName senderIdx) <! InitRoutingTable hopCount
+                                selectActorByName (getNodeName senderIdx) <! InitRoutingTable (hopCount,routingTable)
                                 selectActorByName (getNodeName nextNodeIdx) <! Route (routeType, key, senderIdx, hopCount+1)
                                 nodeMailbox.Self.Tell (UpdateStates (senderIdx, key))
                                 return! loop()
@@ -342,11 +439,19 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                                 return! loop()
                         else
                             // the common prefix length between key and present nodeID
+                            //printfn "key:%s, nodeID:%s" key nodeID
                             let prefixLen = shl key nodeID
-                            if false then
-                                //TODO: use routing table here, to find a nodeIdx to send the join route meassage
-                                
-                                ()
+                            let i = prefixLen
+                            let j = hexCharToInt key.[i]
+                            
+                            if i < nrow && j < hashedIdLength && routingTable.Table.[i,j].NodeID <> "" then
+                                //DONE: use routing table here, to find a nodeIdx to send the join route meassage
+                                nextNodeIdx <- routingTable.Table.[i,j].NodeIdx
+                                printfn "[%s] Routing Table, route \"Node%d join\"to Node%d, hopcount:%d" nodeName senderIdx nextNodeIdx hopCount
+                                selectActorByName (getNodeName senderIdx) <! InitRoutingTable (hopCount,routingTable)
+                                selectActorByName (getNodeName nextNodeIdx) <! Route (routeType, key, senderIdx, hopCount+1)
+                                nodeMailbox.Self.Tell (UpdateStates (senderIdx, key))
+                                return! loop()
                             else
                                 // got through all the nodes in state tables 
                                 //such that shl(nodeID, key) >= prefixLen and |nodeID - key| < |present nodeID - key|
@@ -361,7 +466,7 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                                     if nextNodeIdx <> 0 && nextNodeIdx <> senderIdx && not endOfLoop then
                                         endOfLoop <- true
                                         printfn "[%s] Rare case, find in leaf, route \"Node%d join\"to Node%d, hopcount:%d" nodeName senderIdx nextNodeIdx hopCount
-                                        selectActorByName (getNodeName senderIdx) <! InitRoutingTable hopCount
+                                        selectActorByName (getNodeName senderIdx) <! InitRoutingTable (hopCount,routingTable)
                                         selectActorByName (getNodeName nextNodeIdx) <! Route (routeType, key, senderIdx, hopCount+1)
                                         nodeMailbox.Self.Tell (UpdateStates (senderIdx, key))
                                         return! loop()
@@ -369,7 +474,22 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                                     return! loop()
 
                                 (* Search in routing table *)
-                                //TODO:
+                                for i in 0..nrow-1 do
+                                    for j in 0..ncol-1 do
+                                        let rtKey = routingTable.GetEntry(i,j).NodeID
+                                        let rtIdx = routingTable.GetEntry(i,j).NodeIdx
+                                        if rtKey <> "" && rtIdx <> -1 && (shl rtKey key) >= prefixLen && (diffNumeric rtKey key) < (diffNumeric nodeID key) then
+                                            nextNodeIdx <- rtIdx
+                                        if nextNodeIdx <> 0 && nextNodeIdx <> senderIdx && not endOfLoop then
+                                            endOfLoop <- true
+                                            printfn "[%s] Rare case, find in routingT, route \"Node%d join\"to Node%d, hopcount:%d" nodeName senderIdx nextNodeIdx hopCount
+                                            selectActorByName (getNodeName senderIdx) <! InitRoutingTable (hopCount,routingTable)
+                                            selectActorByName (getNodeName nextNodeIdx) <! Route (routeType, key, senderIdx, hopCount+1)
+                                            nodeMailbox.Self.Tell (UpdateStates (senderIdx, key))
+                                            return! loop()
+                                if endOfLoop then
+                                    return! loop()
+
                                 (* Search in neighbor set*)
                                 for KeyValue(nborIdx, nodeKey) in neighborSet do
                                     if (shl nodeKey key) >= prefixLen && (diffNumeric nodeKey key) < (diffNumeric nodeID key) then
@@ -377,7 +497,7 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                                     if nextNodeIdx <> 0 && nextNodeIdx <> senderIdx && not endOfLoop then
                                         endOfLoop <- true
                                         printfn "[%s] Rare case, find in nbor, route \"Node%d join\"to Node%d, hopcount:%d" nodeName senderIdx nextNodeIdx hopCount
-                                        selectActorByName (getNodeName senderIdx) <! InitRoutingTable hopCount
+                                        selectActorByName (getNodeName senderIdx) <! InitRoutingTable (hopCount,routingTable)
                                         selectActorByName (getNodeName nextNodeIdx) <! Route (routeType, key, senderIdx, hopCount+1)
                                         nodeMailbox.Self.Tell (UpdateStates (senderIdx, key))
                                         return! loop()
@@ -391,14 +511,6 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                                 nodeMailbox.Self.Tell (UpdateStates (senderIdx, key))
                                 return! loop()
                                 
-                                    
-                        //TODO: routing algorithm
-                        (* Send my own state table to the sender *)
-                        //TODO: send back my routing table
-                        (* If We found the nodeZ, which is the numerically closest node to the new node in whole network *)
-                        //TODO: update neighbor table, send back my state tables?
-                        // infrom the new node that i am the destination node
-                        //nodeMailbox.Sender() <! PastryInitDone nextNodeName
                         printfn "[%s] ajsoidfjoeijfowiejfi" nodeName
                         Environment.Exit 1
                         return! loop()
@@ -415,8 +527,9 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                 printfn "[%s] InitNborSet from %s" nodeName (nodeMailbox.Sender().Path.Name)
                 neighborSet <- newNborSet
                 return! loop()
-            | InitRoutingTable row->
-                //TODO: update my routing table row i according this row number
+            | InitRoutingTable (row, newRTB)->
+                // update my routing table row i according this row number
+                routingTable.InitWith row newRTB
                 return! loop()
             | UpdateStates (newNodeIdx, newNodeID) ->
                 printfn "[%s] UpdateStates for Node%d" nodeName newNodeIdx
@@ -424,19 +537,20 @@ let nodes (proxMetric:int [,]) (nodeMailbox:Actor<NodeMessage>) =
                 leafSet <- updateLeafSet nodeID leafSet newNodeIdx newNodeID
                 
                 //printfn "[%s][Update leaf set]\n %A" nodeName leafSet
-                neighborSet <- updateNeighborSet nodeIdx neighborSet proxMetric newNodeIdx newNodeID
+                neighborSet <- updateNeighborSet nodeIdx neighborSet newNodeIdx newNodeID
                 //printfn "[%s][Update nbor set]\n %A" nodeName neighborSet
                 (* update my own routing table *)
+                routingTable.Update (newNodeID, newNodeIdx)
                 //TODO:
                 return! loop()
         return! loop()
     }
     loop()
 
-let pastryBoss (proxMetric:int [,]) numNodes (pbossMailbox:Actor<PastryNodeMessage>) =
+let pastryBoss numNodes (pbossMailbox:Actor<PastryNodeMessage>) =
     let nodeName = pbossMailbox.Self.Path.Name
     //printfn "[%s] %s" nodeName (nodeMailbox.Self.Path.ToString())
-    printfn "[%s]\n %A\n" nodeName proxMetric
+    //printfn "[%s]\n %A\n" nodeName proxMetric
     let mutable nodeCount = 0
     let mutable networkNodeSet = Set.empty
     
@@ -453,7 +567,9 @@ let pastryBoss (proxMetric:int [,]) numNodes (pbossMailbox:Actor<PastryNodeMessa
                 nodeCount <- nodeCount + 1
                 //printfn "[%s] nodeCount:%d" nodeName nodeCount
                 let newNodeName = nodeNamePrefix + nodeCount.ToString()
-                spawn system newNodeName (nodes proxMetric) |> ignore
+                let rnd = Random()
+                let hashID = (hash (getID rnd))
+                spawn system newNodeName (nodes hashID) |> ignore
                 printfn "[%s] Start to add \"%s\" to the pastry network\n" nodeName newNodeName
                 
                 
@@ -468,7 +584,8 @@ let pastryBoss (proxMetric:int [,]) numNodes (pbossMailbox:Actor<PastryNodeMessa
                         //let row = (min idx nodeCount)-1 //array starts from 0
                         //let col = (max idx nodeCount)-1 //array starts from 0
                         //printfn "node:%d, row:%d, col:%d nodeA:%s dis:%d\n" node row col nodeA distance
-                        let prox = getProx proxMetric idx nodeCount
+                        //let prox = getProx proxMetric idx nodeCount
+                        let prox = proxMetric.GetDistance idx nodeCount
                         if prox < distance then
                             nodeAIdx <- idx
                             distance <- prox
@@ -507,30 +624,38 @@ let pastryBoss (proxMetric:int [,]) numNodes (pbossMailbox:Actor<PastryNodeMessa
 [<EntryPoint>]
 let main argv =
     try
-        let tmpNumNodes = argv.[0] |> int
+        let numNodes = argv.[0] |> int
         let numRequest = argv.[1] |> int
+        
+        //test <- ProxityMetric (tmpNumNodes, maxDistance)
+        //test.ShowAll
+        
+        
         
         // start to build the pastry network, ofcourse at least one
         (* get the input arguments *)
-        numNodes <- tmpNumNodes
-        
+        //numNodes <- tmpNumNodes
+        proxMetric <- ProxityMetric(numNodes, maxDistance)
+        //printfn "%d ,,,, %d" (proxMetric.GetDistance 29 2) (proxMetric.GetDistance 2 29)
+        //Environment.Exit 1
         printfn "[MAIN] Start, numNodes:%d, numReqquest:%d" numNodes numRequest
         if numNodes < 0 then
             printfn "numNodes should bigger than zero"
             Environment.Exit 1
 
         (* generate proximity metric *)
+        (*
         let proxMetric = Array2D.create numNodes numNodes 0
+        
         for i in 1 .. numNodes do
-            //printfn "i=%d\n" i
             for j in (i) .. (numNodes-1) do
                 let rnd = Random()
-                //printfn "%d,%d" (i-1) j
                 proxMetric.[i-1,j] <- rnd.Next(0, maxDistance)
+        *)
         //printfn "%A\n" proxMetric
 
         (* Let pastry boss to help building the pastry network *)
-        let pastryBossRef = spawn system nodePastryBoss (pastryBoss proxMetric numNodes)
+        let pastryBossRef = spawn system nodePastryBoss (pastryBoss numNodes)
         pastryBossRef <! AddNewNode
         
 
